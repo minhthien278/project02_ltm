@@ -12,6 +12,8 @@
 #include <sys/time.h>
 #include <openssl/sha.h>  // Thư viện OpenSSL để tính checksum
 #include <zlib.h>  // Thư viện hỗ trợ CRC32
+#include <cstdio>  // remove()
+#include <sys/stat.h> // stat()
 
 #define PORT 8080
 #define SERVER_IP "127.0.0.1"
@@ -123,6 +125,7 @@ void download_chunk(const std::string &filename, long start_offset, long end_off
             total_downloaded += (recv_bytes - 12);
             double progress = std::min(100.0, (total_downloaded * 100.0) / file_total_size);
             std::cout << "\r[Progress] Downloading: " << progress << "%  " << std::flush;
+            std::cout << std::endl;
 
             success = true;
             break; // Chunk đã tải xong, thoát vòng lặp retry
@@ -137,15 +140,34 @@ void download_chunk(const std::string &filename, long start_offset, long end_off
     file.close();
     close(sock);
 
-    std::cout << "[Thread " << thread_id << "] Finished downloading " 
-              << filename << " part " << thread_id 
-              << " (" << received_bytes << " bytes)" << std::endl;
+    // std::cout << "[Thread " << thread_id << "] Finished downloading " 
+    //           << filename << " part " << thread_id 
+    //           << " (" << received_bytes << " bytes)" << std::endl;
+}
+
+bool file_exists(const std::string &filename) {
+    struct stat buffer;
+    return (stat(filename.c_str(), &buffer) == 0);
+}
+
+std::string get_unique_filename(const std::string &filename) {
+    std::string unique_filename = filename + "_merged";
+    int index = 1;
+
+    while (file_exists(unique_filename)) {
+        unique_filename = filename + "_merged_" + std::to_string(index);
+        index++;
+    }
+
+    return unique_filename;
 }
 
 void merge_file(const std::string &filename) {
-    std::ofstream outfile(filename + "_merged", std::ios::binary);
+    std::string merged_filename = get_unique_filename(filename);
+    std::ofstream outfile(merged_filename, std::ios::binary);
+    
     if (!outfile) {
-        std::cerr << "Error creating merged file" << std::endl;
+        std::cerr << "[Error] Không thể tạo file merge: " << merged_filename << std::endl;
         return;
     }
 
@@ -158,8 +180,8 @@ void merge_file(const std::string &filename) {
             continue;
         }
 
-        std::streamsize size = infile.tellg(); // Lấy kích thước file
-        infile.seekg(0, std::ios::beg);        // Quay lại đầu file để đọc
+        std::streamsize size = infile.tellg();
+        infile.seekg(0, std::ios::beg);
 
         if (size == 0) {
             std::cerr << "[Warning] File " << part_filename << " có kích thước 0!" << std::endl;
@@ -167,19 +189,16 @@ void merge_file(const std::string &filename) {
             continue;
         }
 
-        std::cout << "[Debug] Đọc file " << part_filename << " (kích thước: " << size << " bytes)" << std::endl;
-        outfile << infile.rdbuf(); // Ghép nội dung vào file gốc
+        outfile << infile.rdbuf();
         infile.close();
 
-        if (remove(part_filename.c_str()) == 0) {
-            std::cout << "[Debug] Xóa file " << part_filename << " sau khi merge thành công." << std::endl;
-        } else {
+        if (remove(part_filename.c_str()) != 0) {
             std::cerr << "[Error] Không thể xóa file " << part_filename << std::endl;
         }
     }
 
     outfile.close();
-    std::cout << "[Debug] File merge hoàn tất: " << filename + "_merged" << std::endl;
+    std::cout << "[Info] File merge hoàn tất: " << merged_filename << std::endl;
 }
 
 void download_file(const std::string &filename, long file_size) {
@@ -257,12 +276,42 @@ long get_file_size(const std::string &filename) {
     return std::stol(buffer); // Chuyển đổi kích thước file từ string sang long
 }
 
+int get_last_position(const std::string& log_file) {
+    std::ifstream log(log_file);
+    int last_pos = 0;
+    if (log >> last_pos) {
+        return last_pos;
+    }
+    return 0;  // Mặc định đọc từ đầu nếu file log không tồn tại
+}
+
+void save_last_position(const std::string& log_file, int position) {
+    std::ofstream log(log_file, std::ios::trunc);
+    log << position;
+}
+
 int main() {
     request_file_list();  // Yêu cầu danh sách file từ server
+
+    int last_pos = get_last_position("last_position.log");
     std::ifstream input_file("input.txt");
-    std::string filename;
     
+    if (!input_file) {
+        std::cerr << "[ERROR] Không thể mở file input.txt\n";
+        return 1;
+    }
+
+    std::string filename;
+    int current_line = 0;
+
     while (std::getline(input_file, filename)) {
+        current_line++;
+
+        // Bỏ qua các dòng đã đọc trước đó
+        if (current_line <= last_pos) {
+            continue;
+        }
+
         long file_size = get_file_size(filename);
         if (file_size > 0) {
             download_file(filename, file_size);
@@ -270,4 +319,10 @@ int main() {
             std::cerr << "[ERROR] Không thể tải file: " << filename << std::endl;
         }
     }
+
+    // Lưu vị trí cuối cùng đã đọc
+    save_last_position("last_position.log", current_line);
+
+    return 0;
 }
+

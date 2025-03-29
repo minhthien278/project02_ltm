@@ -1,1 +1,4 @@
 100MB.bin
+sample.txt
+1GB.bin
+1GB.bin
