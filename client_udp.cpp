@@ -14,6 +14,7 @@
 #include <zlib.h>  // Thư viện hỗ trợ CRC32
 #include <cstdio>  // remove()
 #include <sys/stat.h> // stat()
+#include <csignal>
 
 #define PORT 8080
 #define SERVER_IP "127.0.0.1"
@@ -72,7 +73,7 @@ void download_chunk(const std::string &filename, long start_offset, long end_off
             }
 
             // Chờ nhận dữ liệu
-            struct timeval timeout = {2, 0};  // 2 giây timeout
+            struct timeval timeout = {2, 0};  // 1 giây timeout
             setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 
             sockaddr_in from_addr;
@@ -290,39 +291,65 @@ void save_last_position(const std::string& log_file, int position) {
     log << position;
 }
 
-int main() {
-    request_file_list();  // Yêu cầu danh sách file từ server
-
-    int last_pos = get_last_position("last_position.log");
-    std::ifstream input_file("input.txt");
-    
-    if (!input_file) {
-        std::cerr << "[ERROR] Không thể mở file input.txt\n";
-        return 1;
-    }
-
-    std::string filename;
-    int current_line = 0;
-
-    while (std::getline(input_file, filename)) {
-        current_line++;
-
-        // Bỏ qua các dòng đã đọc trước đó
-        if (current_line <= last_pos) {
-            continue;
-        }
-
-        long file_size = get_file_size(filename);
-        if (file_size > 0) {
-            download_file(filename, file_size);
-        } else {
-            std::cerr << "[ERROR] Không thể tải file: " << filename << std::endl;
-        }
-    }
-
-    // Lưu vị trí cuối cùng đã đọc
-    save_last_position("last_position.log", current_line);
-
-    return 0;
+void display_menu() {
+    std::cout << "\n===== MENU =====" << std::endl;
+    std::cout << "1. Xem danh sách file trên server" << std::endl;
+    std::cout << "2. Thêm và tải file ngay lập tức" << std::endl;
+    std::cout << "3. Thoát chương trình" << std::endl;
+    std::cout << "Lựa chọn của bạn: ";
 }
 
+void menu() {
+    int choice;
+    do {
+        display_menu();
+        std::cin >> choice;
+        std::cin.ignore(); // Xóa bộ đệm nhập
+
+        switch (choice) {
+            case 1:
+                request_file_list();
+                break;
+            case 2: {
+                std::ofstream output_file("input.txt", std::ios::app);
+                if (!output_file) {
+                    std::cerr << "[ERROR] Không thể mở file input.txt để ghi\n";
+                    break;
+                }
+                std::string filename;
+                std::cout << "Nhập tên file cần tải: ";
+                std::getline(std::cin, filename);
+                output_file << filename << "\n";
+                output_file.close();
+                
+                long file_size = get_file_size(filename);
+                if (file_size > 0) {
+                    download_file(filename, file_size);
+                    std::cout << "Đã tải xong file: " << filename << "\n";
+                } else {
+                    std::cerr << "[ERROR] Không thể tải file: " << filename << std::endl;
+                }
+                break;
+            }
+            case 3:
+                std::cout << "Thoát chương trình..." << std::endl;
+                break;
+            default:
+                std::cout << "Lựa chọn không hợp lệ, vui lòng thử lại!" << std::endl;
+        }
+    } while (choice != 3);
+}
+
+// Hàm xử lý tín hiệu Ctrl + C
+void signal_handler(int signal) {
+    std::cout << "\n[INFO] Nhận tín hiệu Ctrl + C. Đang thoát chương trình...\n";
+    exit(0);
+}
+
+int main() {
+    // Đăng ký bắt tín hiệu Ctrl + C
+    signal(SIGINT, signal_handler);
+    
+    menu();
+    return 0;
+}
