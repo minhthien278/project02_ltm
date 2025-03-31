@@ -19,7 +19,6 @@
 
 
 #define PORT 8080
-#define SERVER_IP "127.0.0.1"
 #define CHUNK_SIZE 65536        // 64 KB
 #define PAYLOAD_SIZE 1024       // UDP payload an toàn (MTU 1500 - header)
 #define NUM_CONNECTIONS 4
@@ -37,7 +36,7 @@ std::string calculate_checksum(const char *data, size_t len) {
     return std::string(reinterpret_cast<const char *>(&crc), sizeof(crc)); // 4 byte CRC32
 }
 
-void download_chunk(const std::string &filename, long start_offset, long end_offset, int thread_id) {
+void download_chunk(const std::string &filename, long start_offset, long end_offset, int thread_id, const char* server_ip) {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
         perror("Socket creation failed");
@@ -45,7 +44,7 @@ void download_chunk(const std::string &filename, long start_offset, long end_off
     }
 
     sockaddr_in server_addr = {AF_INET, htons(PORT)};
-    inet_pton(AF_INET, SERVER_IP, &server_addr.sin_addr);
+    inet_pton(AF_INET, server_ip, &server_addr.sin_addr);
 
     std::ofstream file(filename + ".part" + std::to_string(thread_id), std::ios::binary);
     char buffer[PAYLOAD_SIZE + 12]; // 8 bytes offset + 4 bytes checksum
@@ -204,7 +203,7 @@ void merge_file(const std::string &filename) {
     std::cout << "[Info] File merge hoàn tất: " << merged_filename << std::endl;
 }
 
-void download_file(const std::string &filename, long file_size) {
+void download_file(const std::string &filename, long file_size, const char* server_ip) {
     file_total_size = file_size;  // Gán kích thước tổng
 
     long chunk_per_thread = file_size / NUM_CONNECTIONS;  // Mỗi thread xử lý phần này
@@ -215,7 +214,7 @@ void download_file(const std::string &filename, long file_size) {
         long end_offset = (i == NUM_CONNECTIONS - 1) ? file_size : start_offset + chunk_per_thread;
 
         // Tạo thread tải phần của file (gồm nhiều chunk nhỏ)
-        threads.emplace_back(download_chunk, filename, start_offset, end_offset, i);
+        threads.emplace_back(download_chunk, filename, start_offset, end_offset, i, server_ip);
     }
 
     for (auto &t : threads) t.join();
@@ -225,7 +224,7 @@ void download_file(const std::string &filename, long file_size) {
     total_downloaded = 0;
 }
 
-void request_file_list() {
+void request_file_list(const char* server_ip) {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
         perror("[ERROR] Socket creation failed");
@@ -235,7 +234,7 @@ void request_file_list() {
     sockaddr_in server_addr = {};
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(PORT);
-    inet_pton(AF_INET, SERVER_IP, &server_addr.sin_addr);
+    inet_pton(AF_INET, server_ip, &server_addr.sin_addr);
 
     std::string request = "LIST";
     sendto(sock, request.c_str(), request.size(), 0, (struct sockaddr *)&server_addr, sizeof(server_addr));
@@ -252,7 +251,7 @@ void request_file_list() {
     close(sock);
 }
 
-long get_file_size(const std::string &filename) {
+long get_file_size(const std::string &filename, const char* server_ip) {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
         perror("[ERROR] Socket creation failed");
@@ -262,7 +261,7 @@ long get_file_size(const std::string &filename) {
     sockaddr_in server_addr = {};
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(PORT);
-    inet_pton(AF_INET, SERVER_IP, &server_addr.sin_addr);
+    inet_pton(AF_INET, server_ip, &server_addr.sin_addr);
 
     std::string request = "SIZE " + filename;
     sendto(sock, request.c_str(), request.size(), 0, (struct sockaddr *)&server_addr, sizeof(server_addr));
@@ -280,23 +279,6 @@ long get_file_size(const std::string &filename) {
     return std::stol(buffer); // Chuyển đổi kích thước file từ string sang long
 }
 
-std::vector<std::string> readFile(const std::string& filename) {
-    std::vector<std::string> lines;
-    std::ifstream file(filename);
-
-    if (!file.is_open()) {
-        std::cerr << "Không thể mở file: " << filename << std::endl;
-        return lines; // Trả về vector rỗng nếu không mở được file
-    }
-
-    std::string line;
-    while (std::getline(file, line)) {
-        lines.push_back(line); // Thêm từng dòng vào vector
-    }
-
-    file.close(); // Đóng file sau khi đọc xong
-    return lines;
-}
 
 std::vector<std::string> readFromLine(size_t skipLines, const std::string& filename) {
     std::vector<std::string> result;
@@ -329,7 +311,7 @@ void display_menu() {
     std::cout << "Lựa chọn của bạn: ";
 }
 
-void menu() {
+void menu(const char* server_ip) {
     std::string filename = "input.txt";
     size_t processedLines = 0; // Theo dõi số dòng đã xử lý
     int choice;
@@ -341,7 +323,7 @@ void menu() {
 
         switch (choice) {
             case 1:
-                request_file_list();
+                request_file_list(server_ip);
                 break;
             case 2: {
                 while (true) {
@@ -353,9 +335,9 @@ void menu() {
                     }
 
                     for (const auto& file : newFiles) {
-                        long file_size = get_file_size(file);
+                        long file_size = get_file_size(file, server_ip);
                         if (file_size > 0) {
-                            download_file(file, file_size);
+                            download_file(file, file_size, server_ip);
                             std::cout << "Đã tải xong file: " << file << "\n";
                         } else {
                             std::cerr << "[ERROR] Không thể tải file: " << file << std::endl;
@@ -376,58 +358,26 @@ void menu() {
     } while (choice != 3);
 }
 
-
-// void menu() {
-//     int choice;
-//     do {
-//         display_menu();
-//         std::cin >> choice;
-//         std::cin.ignore(); // Xóa bộ đệm nhập
-
-//         switch (choice) {
-//             case 1:
-//                 request_file_list();
-//                 break;
-//             case 2: {
-//                 std::ofstream output_file("input.txt", std::ios::app);
-//                 if (!output_file) {
-//                     std::cerr << "[ERROR] Không thể mở file input.txt để ghi\n";
-//                     break;
-//                 }
-//                 std::string filename;
-//                 std::cout << "Nhập tên file cần tải: ";
-//                 std::getline(std::cin, filename);
-//                 output_file << filename << "\n";
-//                 output_file.close();
-                
-//                 long file_size = get_file_size(filename);
-//                 if (file_size > 0) {
-//                     download_file(filename, file_size);
-//                     std::cout << "Đã tải xong file: " << filename << "\n";
-//                 } else {
-//                     std::cerr << "[ERROR] Không thể tải file: " << filename << std::endl;
-//                 }
-//                 break;
-//             }
-//             case 3:
-//                 std::cout << "Thoát chương trình..." << std::endl;
-//                 break;
-//             default:
-//                 std::cout << "Lựa chọn không hợp lệ, vui lòng thử lại!" << std::endl;
-//         }
-//     } while (choice != 3);
-// }
-
 // Hàm xử lý tín hiệu Ctrl + C
 void signal_handler(int signal) {
     std::cout << "\n[INFO] Nhận tín hiệu Ctrl + C. Đang thoát chương trình...\n";
     exit(0);
 }
 
-int main() {
+int main(int argc, char *argv[]) {
     // Đăng ký bắt tín hiệu Ctrl + C
     signal(SIGINT, signal_handler);
-    
-    menu();
+
+    // Kiểm tra tham số dòng lệnh
+    if (argc < 2) {
+        printf("Cách dùng: %s <Server_IP>\n", argv[0]);
+        return 1;
+    }
+
+    char *server_ip = argv[1]; // Lấy IP từ tham số dòng lệnh
+    printf("Server đang chạy trên IP: %s, Port: %d\n", server_ip, PORT);
+
+    menu(server_ip);
     return 0;
 }
+
