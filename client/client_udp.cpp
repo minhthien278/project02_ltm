@@ -15,6 +15,8 @@
 #include <cstdio>  // remove()
 #include <sys/stat.h> // stat()
 #include <csignal>
+#include <set>
+
 
 #define PORT 8080
 #define SERVER_IP "127.0.0.1"
@@ -278,18 +280,45 @@ long get_file_size(const std::string &filename) {
     return std::stol(buffer); // Chuyển đổi kích thước file từ string sang long
 }
 
-int get_last_position(const std::string& log_file) {
-    std::ifstream log(log_file);
-    int last_pos = 0;
-    if (log >> last_pos) {
-        return last_pos;
+std::vector<std::string> readFile(const std::string& filename) {
+    std::vector<std::string> lines;
+    std::ifstream file(filename);
+
+    if (!file.is_open()) {
+        std::cerr << "Không thể mở file: " << filename << std::endl;
+        return lines; // Trả về vector rỗng nếu không mở được file
     }
-    return 0;  // Mặc định đọc từ đầu nếu file log không tồn tại
+
+    std::string line;
+    while (std::getline(file, line)) {
+        lines.push_back(line); // Thêm từng dòng vào vector
+    }
+
+    file.close(); // Đóng file sau khi đọc xong
+    return lines;
 }
 
-void save_last_position(const std::string& log_file, int position) {
-    std::ofstream log(log_file, std::ios::trunc);
-    log << position;
+std::vector<std::string> readFromLine(size_t skipLines, const std::string& filename) {
+    std::vector<std::string> result;
+    std::ifstream file(filename);
+
+    if (!file.is_open()) {
+        std::cerr << "Không thể mở file: " << filename << std::endl;
+        return result;
+    }
+
+    std::string line;
+    size_t currentLine = 0;
+
+    while (std::getline(file, line)) {
+        if (currentLine >= skipLines) {
+            result.push_back(line); // Thêm dòng sau khi bỏ qua skipLines dòng đầu tiên
+        }
+        currentLine++;
+    }
+
+    file.close();
+    return result;
 }
 
 void display_menu() {
@@ -301,7 +330,10 @@ void display_menu() {
 }
 
 void menu() {
+    std::string filename = "input.txt";
+    size_t processedLines = 0; // Theo dõi số dòng đã xử lý
     int choice;
+
     do {
         display_menu();
         std::cin >> choice;
@@ -312,24 +344,27 @@ void menu() {
                 request_file_list();
                 break;
             case 2: {
-                std::ofstream output_file("input.txt", std::ios::app);
-                if (!output_file) {
-                    std::cerr << "[ERROR] Không thể mở file input.txt để ghi\n";
-                    break;
+                while (true) {
+                    // Đọc các dòng mới từ file
+                    std::vector<std::string> newFiles = readFromLine(processedLines, filename);
+
+                    if (newFiles.empty()) {
+                        break;
+                    }
+
+                    for (const auto& file : newFiles) {
+                        long file_size = get_file_size(file);
+                        if (file_size > 0) {
+                            download_file(file, file_size);
+                            std::cout << "Đã tải xong file: " << file << "\n";
+                        } else {
+                            std::cerr << "[ERROR] Không thể tải file: " << file << std::endl;
+                        }
+                    }
+
+                    processedLines += newFiles.size();
                 }
-                std::string filename;
-                std::cout << "Nhập tên file cần tải: ";
-                std::getline(std::cin, filename);
-                output_file << filename << "\n";
-                output_file.close();
-                
-                long file_size = get_file_size(filename);
-                if (file_size > 0) {
-                    download_file(filename, file_size);
-                    std::cout << "Đã tải xong file: " << filename << "\n";
-                } else {
-                    std::cerr << "[ERROR] Không thể tải file: " << filename << std::endl;
-                }
+
                 break;
             }
             case 3:
@@ -340,6 +375,48 @@ void menu() {
         }
     } while (choice != 3);
 }
+
+
+// void menu() {
+//     int choice;
+//     do {
+//         display_menu();
+//         std::cin >> choice;
+//         std::cin.ignore(); // Xóa bộ đệm nhập
+
+//         switch (choice) {
+//             case 1:
+//                 request_file_list();
+//                 break;
+//             case 2: {
+//                 std::ofstream output_file("input.txt", std::ios::app);
+//                 if (!output_file) {
+//                     std::cerr << "[ERROR] Không thể mở file input.txt để ghi\n";
+//                     break;
+//                 }
+//                 std::string filename;
+//                 std::cout << "Nhập tên file cần tải: ";
+//                 std::getline(std::cin, filename);
+//                 output_file << filename << "\n";
+//                 output_file.close();
+                
+//                 long file_size = get_file_size(filename);
+//                 if (file_size > 0) {
+//                     download_file(filename, file_size);
+//                     std::cout << "Đã tải xong file: " << filename << "\n";
+//                 } else {
+//                     std::cerr << "[ERROR] Không thể tải file: " << filename << std::endl;
+//                 }
+//                 break;
+//             }
+//             case 3:
+//                 std::cout << "Thoát chương trình..." << std::endl;
+//                 break;
+//             default:
+//                 std::cout << "Lựa chọn không hợp lệ, vui lòng thử lại!" << std::endl;
+//         }
+//     } while (choice != 3);
+// }
 
 // Hàm xử lý tín hiệu Ctrl + C
 void signal_handler(int signal) {

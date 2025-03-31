@@ -1,25 +1,4 @@
-
-1GB.bin
-file.txt
-server_udp
-100MB.bin
-50MB_file.txt
-10MB_	f	ile.txt
-10MB_file.txt
-10MB_file.txt
 10MB_file.txt
 100MB.bin
 100MB.bin
-1GB.bin
-100MB.bin
-100MB.bin
-1GB.bin
-100MB.bin
-1GB.bin
-1GB.bin
-1GB.bin
-1GB.bin
-1GB.bin
-100MB.bin
-1GB.bin
-1GB.bin
+10MB_file.txt
