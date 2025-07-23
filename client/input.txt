@@ -1,4 +1,2 @@
 10MB_file.txt
-100MB.bin
-100MB.bin
 10MB_file.txt

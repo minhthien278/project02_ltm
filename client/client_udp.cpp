@@ -36,116 +36,80 @@ std::string calculate_checksum(const char *data, size_t len) {
     return std::string(reinterpret_cast<const char *>(&crc), sizeof(crc)); // 4 byte CRC32
 }
 
-void download_chunk(const std::string &filename, long start_offset, long end_offset, int thread_id, const char* server_ip) {
-    int sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sock < 0) {
-        perror("Socket creation failed");
+void download_chunk(int sock,
+                    std::ofstream &file,
+                    long &current_offset,
+                    long start_offset,
+                    long end_offset,
+                    const std::string &filename,
+                    int chunk_id,
+                    const sockaddr_in &server_addr)
+{
+    struct AckPacket {
+        long offset;
+        int chunk_id;
+    };
+    char buffer[PAYLOAD_SIZE + 12];
+    sockaddr_in from_addr{};
+    socklen_t addr_len = sizeof(from_addr);
+
+    ssize_t recv_bytes = recvfrom(sock, buffer, sizeof(buffer), 0,
+                                  (struct sockaddr *)&from_addr, &addr_len);
+
+    if (recv_bytes < 12) {
+        std::cerr << "[Chunk " << chunk_id << "] Không nhận được dữ liệu hoặc gói quá nhỏ.\n";
         return;
     }
 
-    sockaddr_in server_addr = {AF_INET, htons(PORT)};
-    inet_pton(AF_INET, server_ip, &server_addr.sin_addr);
+    // Đọc offset từ gói tin
+    long received_offset;
+    memcpy(&received_offset, buffer, sizeof(long));
 
-    std::ofstream file(filename + ".part" + std::to_string(thread_id), std::ios::binary);
-    char buffer[PAYLOAD_SIZE + 12]; // 8 bytes offset + 4 bytes checksum
-    long received_bytes = 0;
-
-    long send_size = std::min((long)PAYLOAD_SIZE, end_offset - start_offset);
-    for (long offset = start_offset; offset < end_offset; offset += send_size) {
-        send_size = std::min((long)PAYLOAD_SIZE, end_offset - offset);
-        int retries = 0;
-        bool success = false;
-
-        while (retries < RETRY_LIMIT) {
-            // Gửi yêu cầu tải chunk
-            std::ostringstream request;
-            request << "DOWNLOAD " << filename << " " << offset << " " << send_size;
-
-            std::cout << "[Thread " << thread_id << "] Requesting chunk at offset: " << offset 
-                      << " (size: " << send_size << " bytes)\n";
-
-            ssize_t sent_bytes = sendto(sock, request.str().c_str(), request.str().size(), 0, 
-                                        (struct sockaddr *)&server_addr, sizeof(server_addr));
-
-            if (sent_bytes < 0) {
-                perror("[Error] sendto failed");
-                retries++;
-                continue;
-            }
-
-            // Chờ nhận dữ liệu
-            struct timeval timeout = {1, 0};  // 1 giây timeout
-            setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-
-            sockaddr_in from_addr;
-            socklen_t addr_len = sizeof(from_addr);
-            ssize_t recv_bytes = recvfrom(sock, buffer, sizeof(buffer), 0, 
-                                          (struct sockaddr *)&from_addr, &addr_len);
-
-            if (recv_bytes < 12) {  // Gói tin quá nhỏ, có thể bị lỗi
-                std::cerr << "[Error] Không nhận được dữ liệu hoặc gói tin quá nhỏ, thử lại...\n";
-                retries++;
-                continue;
-            }
-
-            // Đọc offset từ gói tin
-            long received_offset;
-            memcpy(&received_offset, buffer, sizeof(long));
-
-            if (received_offset != offset) {
-                std::cerr << "[Warning] Offset không khớp! Nhận " << received_offset 
-                          << " nhưng mong đợi " << offset << ". Thử lại...\n";
-                retries++;
-                continue;
-            }
-
-            // Đọc checksum
-            std::string received_checksum(buffer + 8, 4);
-            std::string computed_checksum = calculate_checksum(buffer + 12, recv_bytes - 12);
-
-            if (memcmp(received_checksum.data(), computed_checksum.data(), 4) != 0) {
-                std::cerr << "[Error] Checksum không khớp! Thử lại...\n";
-                retries++;
-                continue;
-            }
-
-            // Ghi dữ liệu vào file (bỏ qua phần header 12 byte)
-            file.write(buffer + 12, recv_bytes - 12);
-            received_bytes += (recv_bytes - 12);
-
-            // Gửi ACK sau khi kiểm tra dữ liệu hợp lệ
-            std::cout << "[DEBUG] Gửi ACK cho offset: " << offset << "\n";
-            ssize_t ack_sent = sendto(sock, &offset, sizeof(long), 0, 
-                                      (struct sockaddr *)&server_addr, sizeof(server_addr));
-
-            if (ack_sent < 0) {
-                perror("[Error] sendto ACK failed");
-            }
-
-            // Cập nhật tiến trình tải
-            std::lock_guard<std::mutex> lock(progress_mutex);
-            total_downloaded += (recv_bytes - 12);
-            double progress = std::min(100.0, (total_downloaded * 100.0) / file_total_size);
-            std::cout << "\r[Progress] Downloading: " << progress << "%  " << std::flush;
-            std::cout << std::endl;
-
-            success = true;
-            break; // Chunk đã tải xong, thoát vòng lặp retry
-        }
-
-        if (!success) {
-            std::cerr << "[Thread " << thread_id << "] Lỗi tải chunk " << offset << " sau " 
-                      << RETRY_LIMIT << " lần thử.\n";
-        }
+    if (received_offset != current_offset) {
+        std::cerr << "[Chunk " << chunk_id << "] Offset không khớp! Nhận: "
+                  << received_offset << ", mong đợi: " << current_offset << "\n";
+        return;
     }
 
-    file.close();
-    close(sock);
+    // Đọc checksum
+    std::string received_checksum(buffer + 8, 4);
+    std::string computed_checksum = calculate_checksum(buffer + 12, recv_bytes - 12);
 
-    // std::cout << "[Thread " << thread_id << "] Finished downloading " 
-    //           << filename << " part " << thread_id 
-    //           << " (" << received_bytes << " bytes)" << std::endl;
+    if (memcmp(received_checksum.data(), computed_checksum.data(), 4) != 0) {
+        std::cerr << "[Chunk " << chunk_id << "] Checksum không khớp! Bỏ qua.\n";
+        return;
+    }
+
+    // Ghi dữ liệu vào file
+    file.write(buffer + 12, recv_bytes - 12);
+    long downloaded_now = recv_bytes - 12;
+
+    current_offset += downloaded_now;
+
+    std::ostringstream oss;
+    oss << "ACK " << received_offset << " " << chunk_id;
+
+    std::string ack_msg = oss.str();
+
+    ssize_t ack_sent = sendto(sock, ack_msg.c_str(), ack_msg.size(), 0,
+                            (struct sockaddr *)&server_addr, sizeof(server_addr));
+    if (ack_sent < 0) {
+        std::cerr << "[Error] sendto ACK failed";
+    } else {
+        std::cout << "[DEBUG] Sent ACK: " << ack_msg << "\n";
+    }
+
+    // Hiển thị tiến độ từng chunk
+    long chunk_size = end_offset - start_offset;
+    double progress = std::min(100.0, ((current_offset - start_offset) * 100.0) / (double)chunk_size);
+
+    std::cout << "\r[Chunk " << chunk_id << "] Progress: " << progress << "%   " << std::flush;
+
+    if (current_offset >= end_offset) {
+        std::cout << "\n[Chunk " << chunk_id << "] Hoàn tất.\n";
+    }
 }
+
 
 bool file_exists(const std::string &filename) {
     struct stat buffer;
@@ -204,22 +168,116 @@ void merge_file(const std::string &filename) {
 }
 
 void download_file(const std::string &filename, long file_size, const char* server_ip) {
-    file_total_size = file_size;  // Gán kích thước tổng
+    file_total_size = file_size;
 
-    long chunk_per_thread = file_size / NUM_CONNECTIONS;  // Mỗi thread xử lý phần này
-    std::vector<std::thread> threads;
+    long chunk_size = file_size / NUM_CONNECTIONS;
 
-    for (int i = 0; i < NUM_CONNECTIONS; i++) {
-        long start_offset = i * chunk_per_thread;
-        long end_offset = (i == NUM_CONNECTIONS - 1) ? file_size : start_offset + chunk_per_thread;
+    struct Chunk {
+        int sock;
+        std::ofstream file;
+        long start_offset;
+        long current_offset;
+        long end_offset;
+        bool done = false;
+        sockaddr_in server_addr;
+        int id;
+    };
 
-        // Tạo thread tải phần của file (gồm nhiều chunk nhỏ)
-        threads.emplace_back(download_chunk, filename, start_offset, end_offset, i, server_ip);
+    std::vector<Chunk> chunks;
+
+    // Tạo 4 socket + file + trạng thái cho từng chunk
+    for (int i = 0; i < NUM_CONNECTIONS; ++i) {
+        Chunk chunk;
+        chunk.id = i;
+        chunk.start_offset = i * chunk_size;
+        chunk.end_offset = (i == NUM_CONNECTIONS - 1) ? file_size : chunk.start_offset + chunk_size;
+        chunk.current_offset = chunk.start_offset;
+
+        chunk.sock = socket(AF_INET, SOCK_DGRAM, 0);
+        if (chunk.sock < 0) {
+            perror("socket failed");
+            exit(1);
+        }
+
+        memset(&chunk.server_addr, 0, sizeof(chunk.server_addr));
+        chunk.server_addr.sin_family = AF_INET;
+        chunk.server_addr.sin_port = htons(PORT);
+        inet_pton(AF_INET, server_ip, &chunk.server_addr.sin_addr);
+
+        chunk.file.open(filename + ".part" + std::to_string(i), std::ios::binary);
+        if (!chunk.file) {
+            std::cerr << "Không mở được file part " << i << "\n";
+            exit(1);
+        }
+
+        // Gửi yêu cầu đầu tiên
+        std::ostringstream req;
+        long first_size = std::min((long)PAYLOAD_SIZE, chunk.end_offset - chunk.current_offset);
+        req << "DOWNLOAD " << filename << " " << chunk.current_offset << " " << first_size << " " << chunk.id;
+
+        sendto(chunk.sock, req.str().c_str(), req.str().size(), 0,
+               (struct sockaddr*)&chunk.server_addr, sizeof(chunk.server_addr));
+
+        chunks.push_back(std::move(chunk));
     }
 
-    for (auto &t : threads) t.join();
+    // Vòng lặp select
+    while (true) {
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        int maxfd = -1;
 
-    std::cout << "[Debug] Tất cả luồng đã kết thúc, chuẩn bị merge file..." << std::endl;
+        int done_count = 0;
+        for (auto& chunk : chunks) {
+            if (!chunk.done) {
+                FD_SET(chunk.sock, &readfds);
+                if (chunk.sock > maxfd) maxfd = chunk.sock;
+            } else {
+                done_count++;
+            }
+        }
+
+        if (done_count == NUM_CONNECTIONS) break;  // tất cả xong
+
+        int ready = select(maxfd+1, &readfds, nullptr, nullptr, nullptr);
+        if (ready < 0) {
+            perror("select error");
+            exit(1);
+        }
+
+        for (auto& chunk : chunks) {
+            if (!chunk.done && FD_ISSET(chunk.sock, &readfds)) {
+                download_chunk(chunk.sock,
+                               chunk.file,
+                               chunk.current_offset,
+                               chunk.start_offset,
+                               chunk.end_offset,
+                               filename,
+                               chunk.id,
+                               chunk.server_addr);
+
+                if (chunk.current_offset >= chunk.end_offset) {
+                    chunk.done = true;
+                    std::cout << "[Chunk " << chunk.id << "] xong.\n";
+                } else {
+                    // gửi yêu cầu tiếp theo
+                    long next_size = std::min((long)PAYLOAD_SIZE, chunk.end_offset - chunk.current_offset);
+                    std::ostringstream req;
+                    req << "DOWNLOAD " << filename << " " << chunk.current_offset << " " << next_size << " " << chunk.id;
+
+                    sendto(chunk.sock, req.str().c_str(), req.str().size(), 0,
+                           (struct sockaddr*)&chunk.server_addr, sizeof(chunk.server_addr));
+                }
+            }
+        }
+    }
+
+    for (auto& chunk : chunks) {
+        chunk.file.close();
+        close(chunk.sock);
+    }
+
+    std::cout << "\n[Debug] Tất cả chunks đã kết thúc, chuẩn bị merge file...\n";
     merge_file(filename);
     total_downloaded = 0;
 }
