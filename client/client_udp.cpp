@@ -181,6 +181,7 @@ void download_file(const std::string &filename, long file_size, const char* serv
         bool done = false;
         sockaddr_in server_addr;
         int id;
+        int retry_count = 0;
     };
 
     std::vector<Chunk> chunks;
@@ -239,7 +240,39 @@ void download_file(const std::string &filename, long file_size, const char* serv
 
         if (done_count == NUM_CONNECTIONS) break;  // tất cả xong
 
-        int ready = select(maxfd+1, &readfds, nullptr, nullptr, nullptr);
+        struct timeval timeout;
+        timeout.tv_sec = 5;
+        timeout.tv_usec = 0;
+
+        int ready = select(maxfd+1, &readfds, nullptr, nullptr, &timeout);
+
+        if (ready == 0) {
+            // Timeout → không có dữ liệu
+            for (auto &chunk : chunks) {
+                if (!chunk.done) {
+                    chunk.retry_count++;
+
+                    if (chunk.retry_count >= RETRY_LIMIT) {
+                        std::cerr << "[Chunk " << chunk.id << "] Quá số lần thử lại! Dừng chunk này.\n";
+                        chunk.done = true;
+                    } else {
+                        // Gửi lại request
+                        long next_size = std::min((long)PAYLOAD_SIZE, chunk.end_offset - chunk.current_offset);
+                        std::ostringstream req;
+                        req << "DOWNLOAD " << filename << " " << chunk.current_offset << " " << next_size << " " << chunk.id;
+
+                        sendto(chunk.sock, req.str().c_str(), req.str().size(), 0,
+                            (struct sockaddr*)&chunk.server_addr, sizeof(chunk.server_addr));
+
+                        std::cerr << "[Chunk " << chunk.id << "] Không phản hồi. Gửi lại request lần " << chunk.retry_count << "\n";
+                    }
+                }
+            }
+
+            continue; // quay lại vòng lặp
+        }
+
+
         if (ready < 0) {
             perror("select error");
             exit(1);
@@ -255,6 +288,8 @@ void download_file(const std::string &filename, long file_size, const char* serv
                                filename,
                                chunk.id,
                                chunk.server_addr);
+
+                chunk.retry_count = 0;
 
                 if (chunk.current_offset >= chunk.end_offset) {
                     chunk.done = true;
