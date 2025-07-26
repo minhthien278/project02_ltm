@@ -16,6 +16,7 @@
 #include <sys/stat.h> // stat()
 #include <csignal>
 #include <set>
+#include <iomanip> // std::setw, std::setprecision
 
 
 #define PORT 8080
@@ -36,6 +37,17 @@ std::string calculate_checksum(const char *data, size_t len) {
     return std::string(reinterpret_cast<const char *>(&crc), sizeof(crc)); // 4 byte CRC32
 }
 
+void print_progress(const std::vector<double> &progresses) {
+    std::ostringstream oss;
+    oss << "\r";
+    for (size_t i = 0; i < progresses.size(); ++i) {
+        oss << "[Chunk " << i << "] "
+            << std::fixed << std::setprecision(1)
+            << std::setw(5) << progresses[i] << "%  ";
+    }
+    std::cout << oss.str() << std::flush;
+}
+
 void download_chunk(int sock,
                     std::ofstream &file,
                     long &current_offset,
@@ -45,10 +57,8 @@ void download_chunk(int sock,
                     int chunk_id,
                     const sockaddr_in &server_addr)
 {
-    struct AckPacket {
-        long offset;
-        int chunk_id;
-    };
+    static std::vector<double> progresses(NUM_CONNECTIONS, 0.0);
+
     char buffer[PAYLOAD_SIZE + 12];
     sockaddr_in from_addr{};
     socklen_t addr_len = sizeof(from_addr);
@@ -56,60 +66,39 @@ void download_chunk(int sock,
     ssize_t recv_bytes = recvfrom(sock, buffer, sizeof(buffer), 0,
                                   (struct sockaddr *)&from_addr, &addr_len);
 
-    if (recv_bytes < 12) {
-        std::cerr << "[Chunk " << chunk_id << "] Không nhận được dữ liệu hoặc gói quá nhỏ.\n";
-        return;
-    }
+    if (recv_bytes < 12) return;
 
-    // Đọc offset từ gói tin
     long received_offset;
     memcpy(&received_offset, buffer, sizeof(long));
 
-    if (received_offset != current_offset) {
-        std::cerr << "[Chunk " << chunk_id << "] Offset không khớp! Nhận: "
-                  << received_offset << ", mong đợi: " << current_offset << "\n";
-        return;
-    }
+    if (received_offset != current_offset) return;
 
-    // Đọc checksum
     std::string received_checksum(buffer + 8, 4);
     std::string computed_checksum = calculate_checksum(buffer + 12, recv_bytes - 12);
 
-    if (memcmp(received_checksum.data(), computed_checksum.data(), 4) != 0) {
-        std::cerr << "[Chunk " << chunk_id << "] Checksum không khớp! Bỏ qua.\n";
-        return;
-    }
+    if (memcmp(received_checksum.data(), computed_checksum.data(), 4) != 0) return;
 
-    // Ghi dữ liệu vào file
     file.write(buffer + 12, recv_bytes - 12);
     long downloaded_now = recv_bytes - 12;
-
     current_offset += downloaded_now;
 
     std::ostringstream oss;
     oss << "ACK " << received_offset << " " << chunk_id;
-
     std::string ack_msg = oss.str();
 
-    ssize_t ack_sent = sendto(sock, ack_msg.c_str(), ack_msg.size(), 0,
-                            (struct sockaddr *)&server_addr, sizeof(server_addr));
-    if (ack_sent < 0) {
-        std::cerr << "[Error] sendto ACK failed";
-    } else {
-        std::cout << "[DEBUG] Sent ACK: " << ack_msg << "\n";
-    }
+    sendto(sock, ack_msg.c_str(), ack_msg.size(), 0,
+           (struct sockaddr *)&server_addr, sizeof(server_addr));
 
-    // Hiển thị tiến độ từng chunk
     long chunk_size = end_offset - start_offset;
     double progress = std::min(100.0, ((current_offset - start_offset) * 100.0) / (double)chunk_size);
+    progresses[chunk_id] = progress;
 
-    std::cout << "\r[Chunk " << chunk_id << "] Progress: " << progress << "%   " << std::flush;
+    print_progress(progresses);
 
     if (current_offset >= end_offset) {
         std::cout << "\n[Chunk " << chunk_id << "] Hoàn tất.\n";
     }
 }
-
 
 bool file_exists(const std::string &filename) {
     struct stat buffer;
@@ -263,8 +252,6 @@ void download_file(const std::string &filename, long file_size, const char* serv
 
                         sendto(chunk.sock, req.str().c_str(), req.str().size(), 0,
                             (struct sockaddr*)&chunk.server_addr, sizeof(chunk.server_addr));
-
-                        std::cerr << "[Chunk " << chunk.id << "] Không phản hồi. Gửi lại request lần " << chunk.retry_count << "\n";
                     }
                 }
             }
@@ -473,4 +460,3 @@ int main(int argc, char *argv[]) {
     menu(server_ip);
     return 0;
 }
-
